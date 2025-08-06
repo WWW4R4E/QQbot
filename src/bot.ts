@@ -31,7 +31,10 @@ export class QQBot {
 
     this.ws.on('open', () => {
       console.log('WebSocket 连接已建立！');
-      console.log(`监控群组 ${this.config.targetGroupId} 中用户 ${this.config.targetUserId} 的消息...`);
+      console.log(`监控 ${this.config.targets.length} 个目标:`);
+      this.config.targets.forEach((target, index) => {
+        console.log(`  ${index + 1}. 群组 ${target.groupId} 中用户 ${target.userId}`);
+      });
     });
 
     this.ws.on('message', async (data: WebSocket.Data) => {
@@ -69,15 +72,22 @@ export class QQBot {
 
     const groupEvent = message as GroupMessageEvent;
     
-    // 检查是否为目标群组和目标用户
-    if (groupEvent.group_id !== this.config.targetGroupId || 
-        groupEvent.user_id !== this.config.targetUserId) {
+    // 检查是否为配置中的任一目标
+    const isTargetMessage = this.config.targets.some(target => 
+      groupEvent.group_id === target.groupId && groupEvent.user_id === target.userId
+    );
+
+    if (!isTargetMessage) {
       return;
     }
 
-    // 只有目标用户的消息才输出详细信息
+    // 找到匹配的目标配置
+    const matchedTarget = this.config.targets.find(target => 
+      groupEvent.group_id === target.groupId && groupEvent.user_id === target.userId
+    );
+
     console.log('收到目标用户 WebSocket 消息:', JSON.stringify(message, null, 2));
-    console.log(`收到目标用户消息: ${groupEvent.raw_message}`);
+    console.log(`收到目标用户消息 (群组: ${groupEvent.group_id}, 用户: ${groupEvent.user_id}): ${groupEvent.raw_message}`);
 
     // 解析消息中的 CQ:reply 标签
     const replyMatch = groupEvent.raw_message.match(/\[CQ:reply,id=(\d+)\]/);

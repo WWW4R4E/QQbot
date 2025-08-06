@@ -36,11 +36,15 @@ export interface SendGroupMsgResponse {
   };
 }
 
+export interface BotTarget {
+  groupId: number;
+  userId: number;
+}
+
 export interface BotConfig {
   napcatHost: string;
   napcatPort: number;
   napcatWebSocketPort: number;
   accessToken?: string;
-  targetGroupId: number;
-  targetUserId: number;
+  targets: BotTarget[];
 }

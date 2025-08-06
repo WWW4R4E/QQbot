@@ -1,27 +1,50 @@
 import * as dotenv from 'dotenv';
 import { QQBot } from './bot';
-import { BotConfig } from './types';
+import { BotConfig, BotTarget } from './types';
 
-// 加载环境变量
 dotenv.config();
 
+function parseTargets(envValue: string): BotTarget[] {
+  if (!envValue) return [];
+  
+  return envValue.split(',').map(target => {
+    const [groupId, userId] = target.split(':');
+    if (!groupId || !userId) {
+      throw new Error(`Invalid target format: ${target}. Expected format: groupId:userId`);
+    }
+    return {
+      groupId: parseInt(groupId),
+      userId: parseInt(userId)
+    };
+  });
+}
+
 function loadConfig(): BotConfig {
+  const targetsEnv = process.env.TARGETS || (process.env.TARGET_GROUP_ID && process.env.TARGET_USER_ID 
+    ? `${process.env.TARGET_GROUP_ID}:${process.env.TARGET_USER_ID}` 
+    : '');
+  
+  const targets = parseTargets(targetsEnv);
+  
   const config: BotConfig = {
     napcatHost: process.env.NAPCAT_HOST || '127.0.0.1',
     napcatPort: parseInt(process.env.NAPCAT_PORT || '3001'),
     napcatWebSocketPort: parseInt(process.env.NAPCAT_WEBSOCKET_PORT || '3002'),
     accessToken: process.env.NAPCAT_ACCESS_TOKEN,
-    targetGroupId: parseInt(process.env.TARGET_GROUP_ID || '0'),
-    targetUserId: parseInt(process.env.TARGET_USER_ID || '0'),
+    targets: targets,
   };
 
-  // 验证必要的配置
-  if (!config.targetGroupId || !config.targetUserId) {
-    console.error('错误: 请在 .env 文件中设置 TARGET_GROUP_ID 和 TARGET_USER_ID');
+  if (targets.length === 0) {
+    console.error('错误: 请在 .env 文件中设置 TARGETS (格式: groupId1:userId1,groupId2:userId2) 或者 TARGET_GROUP_ID 和 TARGET_USER_ID');
+    console.error('示例: TARGETS=123456:789012,456789:012345');
     process.exit(1);
   }
 
-	
+  console.log(`已配置 ${targets.length} 个监听目标:`);
+  targets.forEach((target, index) => {
+    console.log(`  ${index + 1}. 群组 ${target.groupId} 中的用户 ${target.userId}`);
+  });
+
   return config;
 }
 
