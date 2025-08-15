@@ -4,6 +4,9 @@ import { BotConfig, BotTarget } from './types';
 
 dotenv.config();
 
+// 调试用：打印代理环境变量，确认是否被正确加载
+console.log('HTTPS_PROXY:', process.env.HTTPS_PROXY);
+
 function parseTargets(envValue: string): BotTarget[] {
   if (!envValue) return [];
   
@@ -28,10 +31,12 @@ function loadConfig(): BotConfig {
   
   const config: BotConfig = {
     napcatHost: process.env.NAPCAT_HOST || '127.0.0.1',
-    napcatPort: parseInt(process.env.NAPCAT_PORT || '3001'),
     napcatWebSocketPort: parseInt(process.env.NAPCAT_WEBSOCKET_PORT || '3002'),
     accessToken: process.env.NAPCAT_ACCESS_TOKEN,
     targets: targets,
+    geminiApiKey: process.env.GEMINI_API_KEY,
+    geminiModel: process.env.GEMINI_MODEL || 'gemini-1.5-flash', // 默认使用 Gemini 1.5 Flash
+    httpProxy: process.env.HTTP_PROXY, // 修改为 HTTP_PROXY
   };
 
   if (targets.length === 0) {
@@ -51,6 +56,58 @@ function loadConfig(): BotConfig {
 async function main() {
   try {
     const config = loadConfig();
+
+    // 添加 Gemini API 连接测试
+    if (config.geminiApiKey && config.geminiModel) {
+      console.log('正在测试 Gemini API 连接...');
+      try {
+        const { request, Agent } = await import('undici');
+        const API_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+        const headers = {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${config.geminiApiKey}`
+        };
+        const body = JSON.stringify({
+          "model": config.geminiModel,
+          "messages": [
+            {"role": "user", "content": "Hello, Gemini!"}
+          ]
+        });
+
+        let dispatcher;
+        if (config.httpProxy) {
+          console.log('正在设置 HTTP 代理:', config.httpProxy);
+          dispatcher = new Agent({
+            connect: {
+              // @ts-ignore
+              baseUrl: config.httpProxy,
+            },
+          });
+        }
+
+        const { statusCode, headers: responseHeaders, body: responseBody } = await request(API_URL, {
+          method: 'POST',
+          headers: headers,
+          body: body,
+          dispatcher: dispatcher,
+        });
+
+        if (statusCode === 200) {
+          const responseJson = await responseBody.json();
+          console.log('Gemini API 测试成功:', JSON.stringify(responseJson, null, 2));
+        } else {
+          const errorText = await responseBody.text();
+          console.error(`Gemini API 测试失败: 状态码 ${statusCode}, 错误信息: ${errorText}`);
+          console.error('请检查您的网络连接、代理设置和 API 密钥。');
+        }
+      } catch (error) {
+        console.error('Gemini API 测试失败:', error);
+        console.error('请检查您的网络连接、代理设置和 API 密钥。');
+      }
+    } else {
+      console.warn('未配置 Gemini API 密钥或模型，跳过 Gemini API 连接测试。');
+    }
+
     const bot = new QQBot(config);
 
     // 处理优雅关闭
