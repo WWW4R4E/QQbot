@@ -96,10 +96,8 @@ export class NapCatAPI {
 				action,
 				params: params && typeof params === 'object'
 					? Object.keys(params).reduce((acc, key) => {
-						// 处理 message 字段中的 base64 图片
 						if (key === 'message' && typeof params[key] === 'string') {
 							const message = params[key];
-							// 匹配 [CQ:image,file=base64://...] 格式
 							const regex = /\[CQ:image,file=base64:\/\/([a-zA-Z0-9+/=]+)\]/g;
 							let match;
 							let processedMessage = message;
