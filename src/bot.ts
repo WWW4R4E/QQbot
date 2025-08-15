@@ -1,4 +1,4 @@
-import { GenerativeModel, GoogleGenerativeAI } from '@google/generative-ai';
+import { ProxyAgent, request } from 'undici'; // 导入 request
 import WebSocket from 'ws';
 import { MarkdownAnalysis, MarkdownDetector } from './markdown-detector';
 import { MarkdownRenderer } from './markdown-renderer';
@@ -11,18 +11,18 @@ export class QQBot {
 	private config: BotConfig;
 	private ws: WebSocket | null = null;
 	private isRunning: boolean = false;
-	private geminiModel: GenerativeModel | null = null;
-
+	private dispatcher: ProxyAgent | null = null;
 	constructor(config: BotConfig) {
 		this.config = config;
 		this.renderer = new MarkdownRenderer();
 		this.napcatAPI = new NapCatAPI(config);
 
-		if (config.geminiApiKey && config.geminiModel) {
-			const genAI = new GoogleGenerativeAI(config.geminiApiKey);
-			this.geminiModel = genAI.getGenerativeModel({ model: config.geminiModel });
-		} else {
+		if (!config.geminiApiKey || !config.geminiModel) {
 			console.warn('未配置 Gemini API 密钥或模型，Gemini 功能将不可用。');
+		}
+		console.log('初始化代理...');
+		if (this.config.httpProxy) {
+			this.dispatcher = new ProxyAgent({ uri: this.config.httpProxy });
 		}
 	}
 
@@ -89,9 +89,7 @@ export class QQBot {
 		if (!matchedTarget) {
 			return;
 		}
-
-		console.log('收到群组 WebSocket 消息:', JSON.stringify(message, null, 2));
-		console.log(`收到群组消息 (群组: ${groupEvent.group_id}, 用户: ${groupEvent.user_id}): ${groupEvent.raw_message}`);
+		// console.log(`收到群组消息 (群组: ${groupEvent.group_id}, 用户: ${groupEvent.user_id}): ${groupEvent.raw_message}`);
 
 		// 检查是否艾特了机器人
 		const atMeMatch = groupEvent.raw_message.match(/\[CQ:at,qq=(\d+)\]/);
@@ -106,37 +104,60 @@ export class QQBot {
 				.trim();
 
 			// 检查是否以“小幻梦”开头
-			if (cleanedMessage.startsWith('小幻梦')) {
-				const prompt = cleanedMessage.substring('小幻梦'.length).trim();
-				console.log(`检测到“小幻梦”开头消息，准备调用 Gemini API，prompt: ${prompt}`);
+			// if (cleanedMessage.startsWith('小幻梦')) {
+			// const prompt = cleanedMessage.substring('小幻梦'.length).trim();
+			// 	console.log(`检测到“小幻梦”开头消息，准备调用 Gemini API，prompt: ${prompt}`);
 
-				if (prompt) {
-					const geminiResponse = await this.callGeminiAPI(prompt);
-					if (geminiResponse) {
-						console.log('Gemini API 响应:', geminiResponse);
+			// if (prompt) {
+			// const geminiResponse = await this.callGeminiAPI(prompt);
+			const geminiResponse = await this.callGeminiAPI(cleanedMessage);
+			if (geminiResponse) {
+				console.log('Gemini API 响应:', geminiResponse);
+				const geminiMarkdownAnalysis: MarkdownAnalysis = MarkdownDetector.analyzeMarkdown(geminiResponse);
+				if (geminiMarkdownAnalysis.isMarkdown) {
+					console.log('Gemini 响应包含 Markdown 语法，准备渲染为图片...');
+					try {
+						const imageBuffer = await this.renderer.renderToImage(geminiResponse);
+						await this.napcatAPI.sendGroupImageFromBuffer(
+							groupEvent.group_id,
+							imageBuffer,
+							`gemini_markdown_${Date.now()}.png`,
+							String(groupEvent.message_id)
+						);
+						console.log('已发送 Gemini Markdown 图片回复。');
+					} catch (renderError) {
+						console.error('渲染 Gemini Markdown 为图片失败:', renderError);
 						await this.napcatAPI.sendGroupMessage(
 							groupEvent.group_id,
-							`[CQ:reply,id=${groupEvent.message_id}]${geminiResponse}`
+							`[CQ:reply,id=${groupEvent.message_id}]抱歉，渲染 Gemini 回复时出错了 😕`
 						);
-						console.log('已发送 Gemini 回复。');
-						return; // 处理完 Gemini 消息后，不再进行 Markdown 渲染
-					} else {
-						console.warn('Gemini API 未返回有效响应。');
-						await this.napcatAPI.sendGroupMessage(
-							groupEvent.group_id,
-							`[CQ:reply,id=${groupEvent.message_id}]抱歉，小幻梦暂时无法回答您的问题。`
-						);
-						return;
 					}
 				} else {
-					console.log('“小幻梦”后没有有效内容，跳过 Gemini 处理。');
+					console.log('Gemini 响应不包含 Markdown 语法，正常发送文本。');
 					await this.napcatAPI.sendGroupMessage(
 						groupEvent.group_id,
-						`[CQ:reply,id=${groupEvent.message_id}]您好，请在“小幻梦”后输入您的问题。`
+						`[CQ:reply,id=${groupEvent.message_id}]${geminiResponse}`
 					);
-					return;
+					console.log('已发送 Gemini 文本回复。');
 				}
+				return;
+			} else {
+				console.warn('Gemini API 未返回有效响应。');
+				await this.napcatAPI.sendGroupMessage(
+					groupEvent.group_id,
+					`[CQ:reply,id=${groupEvent.message_id}]抱歉，小幻梦暂时无法回答您的问题。`
+				);
+				return;
 			}
+			// } else {
+			// 	console.log('“小幻梦”后没有有效内容，跳过 Gemini 处理。');
+			// 	await this.napcatAPI.sendGroupMessage(
+			// 		groupEvent.group_id,
+			// 		`[CQ:reply,id=${groupEvent.message_id}]您好，请在“小幻梦”后输入您的问题。`
+			// 	);
+			// 	return;
+			// }
+			// }
 		}
 
 		// 解析消息中的 CQ:reply 标签
@@ -149,9 +170,9 @@ export class QQBot {
 		// 检查是否包含 Markdown 语法
 		const markdownAnalysis: MarkdownAnalysis = MarkdownDetector.analyzeMarkdown(cleanMessage);
 		if (!markdownAnalysis.isMarkdown) {
-			console.log('消息不包含 Markdown 语法，跳过处理');
 			return;
 		}
+		console.log('消息包含 Markdown 语法，开始处理');
 		if (replyId) {
 			console.log(`检测到回复消息 ID: ${replyId}`);
 		}
@@ -187,16 +208,44 @@ export class QQBot {
 	}
 
 	private async callGeminiAPI(prompt: string): Promise<string | null> {
-		if (!this.geminiModel) {
-			console.error('Gemini 模型未初始化。');
+		if (!this.config.geminiApiKey || !this.config.geminiModel) {
+			console.error('Gemini API 密钥或模型未配置。');
 			return null;
 		}
 
+		const API_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+		const headers = {
+			"Content-Type": "application/json",
+			"Authorization": `Bearer ${this.config.geminiApiKey}`
+		};
+		const body = JSON.stringify({
+			"model": this.config.geminiModel,
+			"messages": [
+				{ "role": "user", "content": prompt }
+			]
+		});
+
 		try {
-			const result = await this.geminiModel.generateContent(prompt);
-			const response = await result.response;
-			const text = response.text();
-			return text;
+			const { statusCode, headers: responseHeaders, body: responseBody } = await request(API_URL, {
+				method: 'POST',
+				headers: headers,
+				body: body,
+				dispatcher: this.dispatcher!,
+			});
+
+			if (statusCode === 200) {
+				const responseJson: any = await responseBody.json();
+				if (responseJson && responseJson.choices && Array.isArray(responseJson.choices)) {
+					return responseJson.choices[0]?.message?.content?.trim() || null;
+				} else {
+					console.warn('Gemini API 响应中未找到有效内容:', JSON.stringify(responseJson, null, 2));
+					return null;
+				}
+			} else {
+				const errorText = await responseBody.text();
+				console.error(`Gemini API 请求失败: 状态码 ${statusCode}, 错误信息: ${errorText}`);
+				return null;
+			}
 		} catch (error) {
 			console.error('调用 Gemini API 失败:', error);
 			return null;

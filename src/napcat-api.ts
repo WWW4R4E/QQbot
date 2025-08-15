@@ -91,7 +91,41 @@ export class NapCatAPI {
 				echo
 			};
 
-			console.log('发送 API 请求:', JSON.stringify(message, null, 2));
+			// console.log('发送 API 请求:', JSON.stringify(message, null, 2));
+			const logMessage = {
+				action,
+				params: params && typeof params === 'object'
+					? Object.keys(params).reduce((acc, key) => {
+						// 处理 message 字段中的 base64 图片
+						if (key === 'message' && typeof params[key] === 'string') {
+							const message = params[key];
+							// 匹配 [CQ:image,file=base64://...] 格式
+							const regex = /\[CQ:image,file=base64:\/\/([a-zA-Z0-9+/=]+)\]/g;
+							let match;
+							let processedMessage = message;
+
+							while ((match = regex.exec(message)) !== null) {
+								const fullMatch = match[0];
+								const base64Data = match[1];
+								const shortened = base64Data.substring(0, 30);
+								const length = base64Data.length;
+								const replacement = `[CQ:image,file=base64://${shortened}... (length: ${length})]`;
+								processedMessage = processedMessage.replace(fullMatch, replacement);
+							}
+
+							acc[key] = processedMessage;
+						} else if (key === 'file' && typeof params[key] === 'string' && params[key].startsWith('base64://')) {
+							acc[key] = `base64://${params[key].substring(0, 30)}... (length: ${params[key].length})`;
+						} else {
+							acc[key] = params[key];
+						}
+						return acc;
+					}, {} as Record<string, any>)
+					: params,
+				echo
+			};
+			console.log('发送 API 请求:', JSON.stringify(logMessage, null, 2));
+
 
 			const timeout = setTimeout(() => {
 				this.pendingRequests.delete(echo);
