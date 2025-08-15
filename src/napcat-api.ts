@@ -1,8 +1,9 @@
 import * as fs from 'fs';
 import WebSocket from 'ws';
-import { BotConfig, SendGroupMsgResponse } from './types';
+import { BotConfig, NapcatMessage, SendGroupMsgResponse } from './types';
 
 export class NapCatAPI {
+
 	private config: BotConfig;
 	private ws: WebSocket | null = null;
 	private messageId: number = 1;
@@ -197,6 +198,42 @@ export class NapCatAPI {
 		} catch (error) {
 			console.error('发送群图片消息失败:', error);
 			throw error;
+		}
+	}
+	async getMessageById(message_id: number): Promise<NapcatMessage | null> {
+		try {
+			const response = await this.sendRequest('get_msg', { message_id: message_id });
+			console.log('获取消息详情:', JSON.stringify(response, null, 2));
+
+			if (response.status !== 'ok' || response.retcode !== 0) {
+				return null;
+			}
+
+			const data = response.data;
+			const nickname = data.sender?.nickname || '未知用户';
+
+			if (Array.isArray(data.message)) {
+				for (const segment of data.message) {
+					if (segment.type === 'text') {
+						return {
+							type: 'text',
+							sender: { nickname },
+							content: segment.data.text,
+						};
+					} else if (segment.type === 'image') {
+						return {
+							type: 'image',
+							sender: { nickname },
+							content: segment.data.url, 
+						};
+					}
+				}
+			}
+
+			return null;
+		} catch (error) {
+			console.error('获取消息详情失败:', error);
+			return null; 
 		}
 	}
 

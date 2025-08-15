@@ -50,3 +50,38 @@ export interface BotConfig {
 	geminiModel?: string;
 	httpProxy?: string;
 }
+
+// export type ContentPart =
+// 	| { text: string } 
+// 	| {
+// 		inlineData: {
+// 			mimeType: string;
+// 			data: string; 
+// 		};
+// 	};
+
+// export interface CallGeminiMessageContents {
+// 	prompt: string; 
+// 	contents?: ContentPart[]; 
+// }
+export type ContentPart =
+	| { text: string }
+	| {
+		inlineData: {
+			mimeType: string;
+			data: string; // base64 编码的数据
+		};
+	};
+
+export interface CallGeminiMessageContents {
+	prompt?: string; // 可选，用于纯文本
+	contents?: ContentPart[]; // 支持多部分输入（文本+图像）
+}
+
+export interface NapcatMessage {
+	type: 'text' | 'image';
+	sender: {
+		nickname: string;
+	};
+	content: string; // 文本内容 或 图片 URL
+}

@@ -3,7 +3,7 @@ import WebSocket from 'ws';
 import { MarkdownAnalysis, MarkdownDetector } from './markdown-detector';
 import { MarkdownRenderer } from './markdown-renderer';
 import { NapCatAPI } from './napcat-api';
-import { BotConfig, GroupMessageEvent } from './types';
+import { BotConfig, CallGeminiMessageContents, ContentPart, GroupMessageEvent } from './types';
 
 export class QQBot {
 	private renderer: MarkdownRenderer;
@@ -103,16 +103,67 @@ export class QQBot {
 				.replace(/\[CQ:reply,id=\d+\]/g, '')
 				.trim();
 
-			// 检查是否以“小幻梦”开头
-			// if (cleanedMessage.startsWith('小幻梦')) {
-			// const prompt = cleanedMessage.substring('小幻梦'.length).trim();
-			// 	console.log(`检测到“小幻梦”开头消息，准备调用 Gemini API，prompt: ${prompt}`);
+			// 解析消息中的 CQ:reply 标签
+			const replyMatch = groupEvent.raw_message.match(/\[CQ:reply,id=(\d+)\]/);
+			const replyId = replyMatch ? replyMatch[1] : null;
 
-			// if (prompt) {
-			// const geminiResponse = await this.callGeminiAPI(prompt);
-			const geminiResponse = await this.callGeminiAPI(cleanedMessage);
+			// 如果有引用消息，获取被引用的消息内容
+			let fullPrompt: CallGeminiMessageContents | undefined;
+
+			if (replyId && !isNaN(parseInt(replyId, 10))) {
+				const targetMessageId = parseInt(replyId, 10);
+				const referencedMessage = await this.napcatAPI.getMessageById(targetMessageId);
+
+				if (referencedMessage) {
+					const { sender, content, type } = referencedMessage;
+					const userNickname = sender.nickname;
+
+					// 构建 prompt 头部
+					const contextPrompt = `引用 "${userNickname}" 的消息：\n当前消息：\n${cleanedMessage}\n\n`;
+
+					if (type === 'text') {
+						// 纯文本引用
+						fullPrompt = {
+							prompt: `${contextPrompt}引用内容：\n${content}`,
+						};
+					} else if (type === 'image') {
+						// 图片引用：下载 -> 转 base64 -> 构造 inlineData
+						const imageData = await this.downloadImageAsBase64(content);
+						if (imageData) {
+							fullPrompt = {
+								contents: [
+									{ text: contextPrompt + "请结合上方的引用图片内容进行回答。" },
+									{
+										inlineData: {
+											mimeType: imageData.mimeType,
+											data: imageData.base64,
+										},
+									},
+								],
+							};
+						} else {
+							// 下载失败，降级为文本提示
+							fullPrompt = {
+								prompt: `${contextPrompt}引用内容：[图片，但加载失败]`,
+							};
+						}
+					}
+				} else {
+					console.warn('无法获取被引用的消息，ID:', targetMessageId);
+					// 降级：不设置 fullPrompt，走普通流程
+				}
+			}
+
+			// 如果没有引用消息，则使用原始消息作为 prompt
+			if (!fullPrompt) {
+				fullPrompt = { prompt: cleanedMessage };
+			}
+			if (fullPrompt === undefined) {
+				return;
+			}
+			const geminiResponse = await this.callGeminiAPI(fullPrompt);
 			if (geminiResponse) {
-				console.log('Gemini API 响应:', geminiResponse);
+				console.log('Gemini API 响应');
 				const geminiMarkdownAnalysis: MarkdownAnalysis = MarkdownDetector.analyzeMarkdown(geminiResponse);
 				if (geminiMarkdownAnalysis.isMarkdown) {
 					console.log('Gemini 响应包含 Markdown 语法，准备渲染为图片...');
@@ -149,15 +200,6 @@ export class QQBot {
 				);
 				return;
 			}
-			// } else {
-			// 	console.log('“小幻梦”后没有有效内容，跳过 Gemini 处理。');
-			// 	await this.napcatAPI.sendGroupMessage(
-			// 		groupEvent.group_id,
-			// 		`[CQ:reply,id=${groupEvent.message_id}]您好，请在“小幻梦”后输入您的问题。`
-			// 	);
-			// 	return;
-			// }
-			// }
 		}
 
 		// 解析消息中的 CQ:reply 标签
@@ -207,50 +249,134 @@ export class QQBot {
 		}
 	}
 
-	private async callGeminiAPI(prompt: string): Promise<string | null> {
-		if (!this.config.geminiApiKey || !this.config.geminiModel) {
-			console.error('Gemini API 密钥或模型未配置。');
+	private async downloadImageAsBase64(imageUrl: string): Promise<{ base64: string; mimeType: string } | null> {
+		try {
+			const response = await fetch(imageUrl);
+			if (!response.ok) throw new Error(`下载图片失败: ${response.status}`);
+
+			const arrayBuffer = await response.arrayBuffer();
+			const buffer = Buffer.from(arrayBuffer);
+
+			// 简单判断 MIME 类型
+			const uint8Array = new Uint8Array(arrayBuffer.slice(0, 4));
+			let mimeType = 'image/jpeg';
+			if (uint8Array[0] === 0x89 && uint8Array[1] === 0x50 && uint8Array[2] === 0x4e && uint8Array[3] === 0x47) {
+				mimeType = 'image/png';
+			} else if (uint8Array[0] === 0x47 && uint8Array[1] === 0x49 && uint8Array[2] === 0x46) {
+				mimeType = 'image/gif';
+			}
+
+			return {
+				base64: buffer.toString('base64'),
+				mimeType,
+			};
+		} catch (error) {
+			console.error('下载或转换图片失败:', error);
+			return null;
+		}
+	}
+	private async callGeminiAPI(message: CallGeminiMessageContents): Promise<string | null> {
+		const MODEL = this.config.geminiModel;
+		const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${this.config.geminiApiKey}`;
+
+		// 构建 contents 数组
+		const contents = [
+			{
+				role: "user",
+				parts: [] as ContentPart[],
+			},
+		];
+
+		// 处理 prompt 文本
+		if (message.prompt) {
+			contents[0].parts.push({ text: message.prompt });
+		}
+
+		// 处理 contents（如图像）
+		if (message.contents && message.contents.length > 0) {
+			contents[0].parts.push(...message.contents);
+		}
+
+		// 如果没有任何内容，返回 null
+		if (contents[0].parts.length === 0) {
+			console.warn("callGeminiAPI: 没有提供任何内容（prompt 或 contents）");
 			return null;
 		}
 
-		const API_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+		const body = JSON.stringify({
+			contents,
+			// 可选参数
+			// generationConfig: { ... }
+			// safetySettings: { ... }
+		});
+
 		const headers = {
 			"Content-Type": "application/json",
-			"Authorization": `Bearer ${this.config.geminiApiKey}`
 		};
-		const body = JSON.stringify({
-			"model": this.config.geminiModel,
-			"messages": [
-				{ "role": "user", "content": prompt }
-			]
-		});
 
 		try {
 			const { statusCode, headers: responseHeaders, body: responseBody } = await request(API_URL, {
-				method: 'POST',
-				headers: headers,
-				body: body,
+				method: "POST",
+				headers,
+				body,
 				dispatcher: this.dispatcher!,
 			});
 
 			if (statusCode === 200) {
 				const responseJson: any = await responseBody.json();
-				if (responseJson && responseJson.choices && Array.isArray(responseJson.choices)) {
-					return responseJson.choices[0]?.message?.content?.trim() || null;
-				} else {
-					console.warn('Gemini API 响应中未找到有效内容:', JSON.stringify(responseJson, null, 2));
-					return null;
-				}
+				const text = responseJson?.candidates?.[0]?.content?.parts?.[0]?.text;
+				return text?.trim() || null;
 			} else {
 				const errorText = await responseBody.text();
 				console.error(`Gemini API 请求失败: 状态码 ${statusCode}, 错误信息: ${errorText}`);
 				return null;
 			}
 		} catch (error) {
-			console.error('调用 Gemini API 失败:', error);
+			console.error("调用 Gemini API 失败:", error);
 			return null;
 		}
 	}
+	// private async callGeminiAPI(message: CallGeminiMessageContents): Promise<string | null> {
+
+	// 	const API_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+	// 	const headers = {
+	// 		"Content-Type": "application/json",
+	// 		"Authorization": `Bearer ${this.config.geminiApiKey}`
+	// 	};
+	// 	const body = JSON.stringify({
+	// 		"model": this.config.geminiModel,
+	// 		// "contents": message.prompt
+	// 		"messages": [
+	// 			{ "role": "user", "content": message}
+	// 		]
+	// 	});
+
+	// 	try {
+	// 		const { statusCode, headers: responseHeaders, body: responseBody } = await request(API_URL, {
+	// 			method: 'POST',
+	// 			headers: headers,
+	// 			body: body,
+	// 			dispatcher: this.dispatcher!,
+	// 		});
+
+	// 		if (statusCode === 200) {
+	// 			const responseJson: any = await responseBody.json();
+	// 			if (responseJson && responseJson.choices && Array.isArray(responseJson.choices)) {
+	// 				return responseJson.choices[0]?.message?.content?.trim() || null;
+	// 			} else {
+	// 				console.warn('Gemini API 响应中未找到有效内容:', JSON.stringify(responseJson, null, 2));
+	// 				return null;
+	// 			}
+	// 		} else {
+	// 			const errorText = await responseBody.text();
+	// 			console.error(`Gemini API 请求失败: 状态码 ${statusCode}, 错误信息: ${errorText}`);
+	// 			return null;
+	// 		}
+	// 	} catch (error) {
+	// 		console.error('调用 Gemini API 失败:', error);
+	// 		return null;
+	// 	}
+	// }
 
 	async start(): Promise<void> {
 		try {
